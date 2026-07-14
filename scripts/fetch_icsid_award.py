@@ -2,7 +2,7 @@
 """
 fetch_icsid_award.py - identify, confirm, and extract an ICSID decision/award.
 
-Part of the ISDS Research skill (Track 1). Compliant, on-demand, single-document
+Part of the ISDS Research skill. Compliant, on-demand, single-document
 retrieval from ICSID (icsid.worldbank.org / icsidfiles.worldbank.org) for
 personal, non-commercial research. Does NOT mirror or redistribute.
 

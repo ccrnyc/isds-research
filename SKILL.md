@@ -6,7 +6,7 @@ license: AGPL-3.0-only
 description: Compliant, retrieval-grounded research over investor-State dispute settlement (ISDS) awards and decisions. Use when the user asks about ICSID / investment-treaty arbitration cases, awards, or doctrines (fair and equitable treatment, expropriation, jurisdiction, costs, annulment, etc.) and wants answers grounded in the actual document text with pinpoint citations. Identifies the correct document on the case page, confirms it against the PDF's own first pages, retrieves primary documents on demand from ICSID, PCA, etc., never scrapes or hosts a corpus in violation of applicable terms, and cites only retrieved text.
 ---
 
-# ISDS Research (Track 1)
+# ISDS Research
 
 Answer questions about ISDS cases by retrieving the **primary documents on demand** and grounding every legal statement in the retrieved text, with pinpoint (paragraph / page) citations. This is a research aid, **not legal advice**.
 

@@ -4,7 +4,7 @@ query_unctad_excel.py — filter the local UNCTAD ISDS Navigator full-data Excel
 snapshot and emit structured, citation-ready results with a mandatory
 data-freshness footer.
 
-Part of the isds-research skill (Track 1). Compliance posture: the Excel is
+Part of the isds-research skill. Compliance posture: the Excel is
 UNCTAD's intended public data product; filtering happens locally, for
 non-commercial research; nothing is republished. This script never fetches
 case pages in bulk — its only network action is an optional, throttled
