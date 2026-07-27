@@ -108,9 +108,10 @@ GET IT:
   2. Latest known direct link (31/12/2023 snapshot):
      https://investmentpolicy.unctad.org/uploaded-files/document/UNCTAD-ISDS-Navigator-data-set-31December2023.xlsx
 
-THEN: place the .xlsx in the skill's data/ folder. In a Claude chat, simply
-upload the downloaded file and ask Claude to save it into the skill's data/
-folder — Claude will reuse it in later sessions without re-uploading.
+THEN: place the .xlsx in the skill's data/ folder. In a chat, simply
+upload the downloaded file and ask your assistant to save it into the skill's data/
+folder — where the platform persists skill files, it will be reused in later
+sessions without re-uploading.
 
 (Award retrieval via fetch_icsid_award.py works without this file; only
 case-enumeration questions need it.)"""

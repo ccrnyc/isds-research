@@ -31,7 +31,12 @@ never discards other languages. When the preferred language is unavailable it
 falls back to the ORIGINAL-language version and flags that any rendering into the
 preferred language would be the assistant's OWN translation (to be labelled as
 such). The preferred language is asked once (first run) and stored in a config
-file; pass --set-prefer-lang to record it and --show-config to read it.
+file together with the research-folder root (where each topic's memo and
+retrieved PDFs are saved); pass --set-prefer-lang / --set-research-root to
+record them and --show-config to read them. If the default config location
+(beside the script) is not writable -- installed skill folders are commonly
+mounted read-only -- the script reports that cleanly (never a traceback) and
+the caller passes a writable --config path instead (see SKILL.md, "First run").
 
 Requires: requests, pdfplumber   ->   pip install requests pdfplumber
 
@@ -57,7 +62,7 @@ try:
 except ImportError:
     sys.exit("Missing dependency: pip install pdfplumber")
 
-UA = ("isds-research-skill/1.0.0 (personal, non-commercial research; "
+UA = ("isds-research-skill/1.1.0 (personal, non-commercial research; "
       "on-demand single-document retrieval)")
 HEADERS = {"User-Agent": UA}
 CASE_DETAIL = "https://icsid.worldbank.org/cases/case-database/case-detail?CaseNo={}"
@@ -89,9 +94,13 @@ def attribution(url=None, pdf_file=None, source_url=None):
         line += f"\nRetrieved from: {ref}"
     return line
 
-# Config lives beside the script for the standalone prototype. When this skill is
-# packaged as a plugin, relocate to the plugin config dir (~/.claude/plugins/config/...).
+# Config lives beside the script by default (standalone/local use, where the folder
+# is writable). Installed skill folders are often mounted READ-ONLY: --show-config
+# reports CONFIG_DIR_WRITABLE up front so callers can detect that before any failed
+# write, and keep the config instead at a user-chosen writable location passed via
+# --config on every call (suggested filename outside the skill folder below).
 DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user-config.json")
+EXTERNAL_CONFIG_NAME = "isds-research-config.json"
 
 PARA_RE = re.compile(r"^\s*(\d{1,3})\.\s")          # paragraph markers like "154. "
 BRACKET_PARA_RE = re.compile(r"^\s*\[(\d{1,4})\]\s")  # bracketed markers like "[324] " (e.g. Iberdrola v. Guatemala)
@@ -159,6 +168,18 @@ def save_config(path, cfg):
         json.dump(cfg, fh, indent=2)
 
 
+def config_writable(path):
+    """Can `path` be (re)written? Checks the file itself if it exists, else its
+    parent directory. os.access reflects read-only mounts (EROFS) as well as
+    permissions, so this detects an installed skill's read-only folder without
+    side effects."""
+    p = os.path.abspath(path)
+    if os.path.exists(p):
+        return os.access(p, os.W_OK)
+    parent = os.path.dirname(p) or "."
+    return os.path.isdir(parent) and os.access(parent, os.W_OK)
+
+
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
@@ -168,6 +189,28 @@ def polite_get(url, **kw):
     r = requests.get(url, headers=HEADERS, timeout=60, **kw)
     r.raise_for_status()
     return r
+
+
+def fail_fetch(url, what, exc):
+    """Print a clean FETCH FAILED block (no traceback) and exit 5.
+
+    Mirrors the CONFIG NOT SAVED contract: a network failure is an expected,
+    documented outcome with a next step, never a stack trace.
+    """
+    print("\n===== FETCH FAILED (host unreachable or refused the request) =====")
+    print(f"While: {what}")
+    print(f"Tried: {url}")
+    print(f"Error: {exc.__class__.__name__}: {exc}")
+    print("Do NOT retry the same fetch blindly, do NOT fetch the document by hand,\n"
+          "and NEVER substitute an unofficial mirror. Diagnose first: run --check-env\n"
+          "to see which source hosts this environment can reach. If egress to this\n"
+          "host is blocked, or the host refuses this client (e.g. HTTP 403), follow\n"
+          "the Retrieval fallback ladder in SKILL.md: a JS-capable browser render of\n"
+          "the case page plus --doc-url (rung 2), or a user-supplied copy of the\n"
+          "official document via --pdf-file <path> --source-url <official URL>\n"
+          "(rung 3). The CONFIRM identity check still runs on every fallback route.")
+    print("=====")
+    sys.exit(5)
 
 
 # --------------------------------------------------------------------------- #
@@ -429,6 +472,71 @@ def cite(it, multi_section=False):
 
 
 # --------------------------------------------------------------------------- #
+# Environment check
+# --------------------------------------------------------------------------- #
+def check_env(config_path):
+    """--check-env: report dependencies, network egress to each source host, and
+    config writability, so the caller can choose the full pipeline or a degraded
+    mode (see SKILL.md, "Platform notes") BEFORE the first retrieval fails
+    mid-answer. Never raises; exit code 0 = PASS, 4 = DEGRADED."""
+    ok = True
+    print("===== ISDS-RESEARCH ENVIRONMENT CHECK =====")
+    print(f"python            : {sys.version.split()[0]}")
+    for mod, note in (("requests", "required (HTTP retrieval)"),
+                      ("pdfplumber", "required (PDF text extraction)"),
+                      ("openpyxl", "optional (UNCTAD Excel enumeration)")):
+        try:
+            m = __import__(mod)
+            print(f"dep  {mod:<13}: OK {getattr(m, '__version__', '')}".rstrip())
+        except ImportError:
+            if mod == "openpyxl":
+                print(f"dep  {mod:<13}: WARN missing - {note}; pip install {mod}")
+            else:
+                ok = False
+                print(f"dep  {mod:<13}: FAIL missing - {note}; pip install {mod}")
+    probes = (
+        ("icsid.worldbank.org", "case pages",
+         "https://icsid.worldbank.org/cases/case-database/case-detail?CaseNo=ARB/07/30"),
+        ("icsidfiles.worldbank.org", "document PDFs",
+         "https://icsidfiles.worldbank.org/icsid/ICSIDBLOBS/OnlineAwards/C259/DS11957_En.pdf"),
+        ("investmentpolicy.unctad.org", "UNCTAD Navigator",
+         "https://investmentpolicy.unctad.org/"),
+        ("pca-cpa.org", "PCA case pages", "https://pca-cpa.org/en/cases/"),
+    )
+    for host, what, url in probes:
+        try:
+            r = requests.get(url, headers={**HEADERS, "Range": "bytes=0-2047"},
+                             timeout=15, stream=True)
+            status = r.status_code
+            r.close()
+            if status in (200, 206):
+                print(f"net  {host:<27}: OK HTTP {status} ({what})")
+            else:
+                print(f"net  {host:<27}: WARN HTTP {status} ({what}) - host reachable; "
+                      f"non-200 may be bot protection or a moved probe URL")
+        except Exception as exc:
+            ok = False
+            print(f"net  {host:<27}: FAIL {type(exc).__name__}: {exc}")
+        time.sleep(0.5)
+    print(f"config path       : {os.path.abspath(config_path)}")
+    writable = config_writable(config_path)
+    print(f"config writable   : "
+          f"{'yes' if writable else 'NO - choose a writable --config path (SKILL.md, First run)'}")
+    cfg = load_config(config_path)
+    print(f"config present    : "
+          f"{json.dumps(cfg, ensure_ascii=False) if cfg else 'no (run the first-run interview)'}")
+    rr = cfg.get("research_root")
+    if rr:
+        state = ("OK" if (os.path.isdir(rr) and os.access(rr, os.W_OK))
+                 else "MISSING/UNWRITABLE - re-ask the user")
+        print(f"research_root     : {rr} [{state}]")
+    print("VERDICT: " + ("PASS - full retrieval pipeline available" if ok else
+                         "DEGRADED - use the fallback modes in SKILL.md 'Platform notes'"))
+    print("===== END ENVIRONMENT CHECK =====")
+    return 0 if ok else 4
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 def main():
@@ -453,19 +561,57 @@ def main():
     ap.add_argument("--max-chars", type=int, default=2000, help="max chars per printed passage")
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="path to preferences config json")
     ap.add_argument("--set-prefer-lang", help="record a preferred language in the config and exit")
+    ap.add_argument("--set-research-root", help="record where research folders (each topic's memo + "
+                    "retrieved PDFs) are saved; may be combined with --set-prefer-lang")
     ap.add_argument("--show-config", action="store_true", help="print the stored preferences and exit")
+    ap.add_argument("--check-env", action="store_true", help="check dependencies, network egress to the "
+                    "source hosts, and config writability; print a PASS/DEGRADED report and exit")
     args = ap.parse_args()
 
     # --- config-only operations ---------------------------------------------
-    if args.set_prefer_lang:
+    if args.check_env:
+        sys.exit(check_env(args.config))
+    if args.set_prefer_lang or args.set_research_root:
         cfg = load_config(args.config)
-        cfg["preferred_language"] = args.set_prefer_lang
-        save_config(args.config, cfg)
-        print(f"Recorded preferred_language = {args.set_prefer_lang!r} in {args.config}")
+        if args.set_prefer_lang:
+            cfg["preferred_language"] = args.set_prefer_lang
+        if args.set_research_root:
+            cfg["research_root"] = args.set_research_root
+        try:
+            save_config(args.config, cfg)
+        except OSError as exc:
+            print("\n===== CONFIG NOT SAVED (location not writable) =====")
+            print(f"Tried: {os.path.abspath(args.config)}")
+            print(f"Error: {exc}")
+            print("This location cannot store preferences (typical cause: an installed skill\n"
+                  "folder mounted read-only). Do NOT retry the same path, and do NOT drop the\n"
+                  "user's answer. ASK THE USER where preferences should live (suggested\n"
+                  "default: the root of their ISDS research area -- the same place research\n"
+                  "folders are saved), then re-run with a writable path, e.g.:\n"
+                  f'  --config "<research area>/{EXTERNAL_CONFIG_NAME}" '
+                  '--set-prefer-lang "..." [--set-research-root "..."]\n'
+                  "and pass that same --config on EVERY later call, in this and future sessions.")
+            print("=====")
+            sys.exit(3)
+        recorded = ", ".join(f"{k} = {cfg[k]!r}"
+                             for k in ("preferred_language", "research_root") if k in cfg)
+        print(f"Recorded {recorded} in {os.path.abspath(args.config)}")
         return
     if args.show_config:
         cfg = load_config(args.config)
-        print(json.dumps(cfg, ensure_ascii=False) if cfg else "NO_CONFIG (first run: ask the user their preferred language)")
+        writable = config_writable(args.config)
+        print(f"CONFIG_PATH={os.path.abspath(args.config)}")
+        print(f"CONFIG_DIR_WRITABLE={'yes' if writable else 'no'}")
+        if cfg:
+            print(json.dumps(cfg, ensure_ascii=False))
+        else:
+            print("NO_CONFIG (first run: ask the user (1) their preferred language and "
+                  "(2) where research folders and preferences should be saved -- see "
+                  'SKILL.md, "First run")')
+        if not writable:
+            print("# NOTE: this config location is NOT writable (installed skill folders often "
+                  "are read-only).\n# Store preferences at a user-chosen writable location and "
+                  f'pass --config "<folder>/{EXTERNAL_CONFIG_NAME}" on every call.')
         return
 
     if not (args.case or args.case_url or args.doc_url or args.pdf_file):
@@ -488,12 +634,16 @@ def main():
     if not chosen_url and not args.pdf_file:
         case_url = args.case_url or CASE_DETAIL.format(quote(args.case, safe="()/"))
         print(f"[1] Case page: {case_url}", file=sys.stderr)
-        page = polite_get(case_url).text
+        try:
+            page = polite_get(case_url).text
+        except requests.RequestException as exc:
+            fail_fetch(case_url, "fetching the case page (document list)", exc)
         docs = parse_documents(page)
         if not docs:
             sys.exit("No documents parsed from the case page. Do NOT guess a URL. The page may be "
-                     "JS-rendered or restructured: retry via a JS-capable render (e.g. Claude in "
-                     "Chrome) or open the case page manually and pass --doc-url.")
+                     "JS-rendered or restructured: retry via a JS-capable browser render (e.g. Claude "
+                     "in Chrome, or the assistant's browsing mode) or open the case page "
+                     "manually and pass --doc-url.")
         if args.list or not args.select:
             print(f"[2] {len(docs)} document(s) found:", file=sys.stderr)
             print_document_table(docs)
@@ -531,10 +681,13 @@ def main():
             pdf_path = args.pdf_file
         else:
             pdf_path = os.path.join(td, "doc.pdf")
-            with polite_get(chosen_url, stream=True) as r:
-                with open(pdf_path, "wb") as fh:
-                    for chunk in r.iter_content(8192):
-                        fh.write(chunk)
+            try:
+                with polite_get(chosen_url, stream=True) as r:
+                    with open(pdf_path, "wb") as fh:
+                        for chunk in r.iter_content(8192):
+                            fh.write(chunk)
+            except requests.RequestException as exc:
+                fail_fetch(chosen_url, "downloading the document PDF", exc)
 
         confirm_text, total_pages = first_pages(pdf_path, args.confirm_pages)
         print(f"[4] Downloaded ({total_pages} pages). Extracting text...", file=sys.stderr)
