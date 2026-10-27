@@ -62,7 +62,7 @@ try:
 except ImportError:
     sys.exit("Missing dependency: pip install pdfplumber")
 
-UA = ("isds-research-skill/1.1.0 (personal, non-commercial research; "
+UA = ("isds-research-skill/1.2.1 (personal, non-commercial research; "
       "on-demand single-document retrieval)")
 HEADERS = {"User-Agent": UA}
 CASE_DETAIL = "https://icsid.worldbank.org/cases/case-database/case-detail?CaseNo={}"

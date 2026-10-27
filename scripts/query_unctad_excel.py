@@ -29,6 +29,9 @@ import sys
 import urllib.parse
 from datetime import datetime, date
 
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")  # 2025 file: benign print-area warning
+
 try:
     import openpyxl
 except ImportError:
@@ -42,11 +45,20 @@ CACHE_PATH = os.path.join(SCRIPT_DIR, ".freshness-cache.json")
 # is unavailable. Update when a newer observation is made.
 LAST_KNOWN = {"updated_as_of": "31/12/2025", "total": 1463, "observed_on": "2026-07-02"}
 
+# v1.2.0: this version works with ONE release only — the 31/12/2025 full-data
+# Excel. Any other release (older or newer) is refused with download guidance,
+# so an answer can never silently rest on a release the skill was not tested on.
+REQUIRED_RELEASE = "31 December 2025"
+REQUIRED_RELEASE_SHORT = "31/12/2025"
+RELEASE_CASES = 1463
+RELEASE_PAGE = "https://investmentpolicy.unctad.org/publications/1325/investment-dispute-settlement-navigator-full-isds-data-release-as-of-31-12-2025-"
+RELEASE_FILE = "https://investmentpolicy.unctad.org/uploaded-files/document/UNCTAD-ISDS-Navigator-data-set-31December2025.xlsx"
+
 FRESHNESS_URL = (
     "https://investmentpolicy.unctad.org/investment-dispute-settlement/cases/68/cms-v-argentina"
 )
 
-# Canonical column keys -> exact header text in the 31/12/2023 release.
+# Canonical column keys -> exact header text in the 31/12/2025 release.
 EXPECTED_HEADERS = {
     "NO": "NO.",
     "YEAR": "YEAR OF INITIATION",
@@ -91,7 +103,7 @@ DECISION_DATE_RE = re.compile(r"dated\s+(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})")
 # A concluded case is flagged for live verification if its last recorded
 # decision is on/after this date (recent activity => plausibly more since
 # the snapshot). Aligned with the routing taxonomy in SKILL.md.
-RECENT_DECISION_CUTOFF = date(2021, 1, 1)
+RECENT_DECISION_CUTOFF = date(2023, 1, 1)  # v1.2.0: moved with the snapshot (2021 for the 31/12/2023 release)
 
 
 DATA_MISSING_MSG = """DATA_MISSING
@@ -103,10 +115,10 @@ not ship the dataset or fetch it for you. Each user obtains their own copy
 directly from UNCTAD (free, no registration). One download; reused thereafter.
 
 GET IT:
-  1. Check for the newest full-data release:
-     https://investmentpolicy.unctad.org/publications/1303/investment-dispute-settlement-navigator-full-isds-data-release-as-of-31-12-2023-in-excel-format-
-  2. Latest known direct link (31/12/2023 snapshot):
-     https://investmentpolicy.unctad.org/uploaded-files/document/UNCTAD-ISDS-Navigator-data-set-31December2023.xlsx
+  1. Release page (this version of the skill requires the 31/12/2025 release):
+     https://investmentpolicy.unctad.org/publications/1325/investment-dispute-settlement-navigator-full-isds-data-release-as-of-31-12-2025-
+  2. Direct link:
+     https://investmentpolicy.unctad.org/uploaded-files/document/UNCTAD-ISDS-Navigator-data-set-31December2025.xlsx
 
 THEN: place the .xlsx in the skill's data/ folder. In a chat, simply
 upload the downloaded file and ask your assistant to save it into the skill's data/
@@ -127,9 +139,36 @@ def find_data_file(explicit):
         print(DATA_MISSING_MSG.format(data_dir=os.path.normpath(DATA_DIR)))
         sys.exit(2)
     if len(candidates) > 1:
-        sys.exit("ERROR: multiple .xlsx files in data/; pass --data PATH:\n  "
-                 + "\n  ".join(candidates))
+        ok = []
+        for c in candidates:
+            try:
+                if _is_required_release(snapshot_date_from(c, openpyxl.load_workbook(c, read_only=True))):
+                    ok.append(c)
+            except Exception:
+                pass
+        if len(ok) == 1:
+            print(f"NOTE: several .xlsx files in data/; using the {REQUIRED_RELEASE_SHORT} release: {ok[0]}",
+                  file=sys.stderr)
+            return ok[0]
+        sys.exit(f"ERROR: {len(ok)} of the .xlsx files in data/ are the {REQUIRED_RELEASE_SHORT} "
+                 "release (exactly one is needed); pass --data PATH:\n  " + "\n  ".join(candidates))
     return candidates[0]
+
+
+def _is_required_release(snap):
+    return re.sub(r"\s+", "", str(snap)).lower() == re.sub(r"\s+", "", REQUIRED_RELEASE).lower()
+
+
+WRONG_RELEASE_MSG = """WRONG_RELEASE
+The UNCTAD Excel at {path} is the release dated "{found}".
+This version of the skill works only with the {required} release ({cases} cases):
+the column layout, case counts and data-freshness statements were built and
+tested on that release alone. Ask the user to download it from UNCTAD and put it
+in the skill's data/ folder (it may sit beside the old file; the {short} release
+is picked automatically):
+  Release page: {page}
+  Direct link:  {file}
+Do not answer enumeration questions from the other release in the meantime."""
 
 
 def snapshot_date_from(path, wb):
@@ -149,6 +188,11 @@ def snapshot_date_from(path, wb):
 def load_rows(path):
     wb = openpyxl.load_workbook(path, read_only=True)
     snap = snapshot_date_from(path, wb)
+    if not _is_required_release(snap):
+        print(WRONG_RELEASE_MSG.format(path=path, found=snap, required=REQUIRED_RELEASE,
+                                       cases=RELEASE_CASES, short=REQUIRED_RELEASE_SHORT,
+                                       page=RELEASE_PAGE, file=RELEASE_FILE))
+        sys.exit(3)
     ws = None
     for cand in wb.worksheets:
         if "disclaimer" not in cand.title.lower():
@@ -168,8 +212,8 @@ def load_rows(path):
                         header_map[key] = norm.index(header.upper())
                 missing = set(EXPECTED_HEADERS) - set(header_map)
                 if missing:
-                    print(f"WARNING: headers not found (schema drift?): {sorted(missing)}",
-                          file=sys.stderr)
+                    sys.exit(f"ERROR: expected column headers not found: {sorted(missing)} — "
+                             f"is this the {REQUIRED_RELEASE_SHORT} UNCTAD full-data Excel?")
             continue
         try:
             int(float(vals[header_map["NO"]]))
@@ -179,6 +223,9 @@ def load_rows(path):
                      for key, idx in header_map.items()})
     if header_map is None:
         sys.exit("ERROR: header row not found — is this the UNCTAD full-data Excel?")
+    if len(rows) != RELEASE_CASES:
+        print(f"WARNING: {len(rows)} case rows read; the {REQUIRED_RELEASE_SHORT} release has "
+              f"{RELEASE_CASES}. Report this discrepancy with any count you give.", file=sys.stderr)
     return snap, rows
 
 
@@ -219,6 +266,49 @@ def live_check_flag(rec):
     if ld and ld >= RECENT_DECISION_CUTOFF and not reasons:
         reasons.append(f"recent activity (last decision {ld.isoformat()})")
     return "; ".join(reasons)
+
+
+# v1.2.1 (listing fix, 2026-10-27): UNCTAD separates several values in a cell
+# with ";" + newline. A single label can contain "; " ("Tertiary - E - Water
+# supply; sewerage, waste management and remediation activities"), so "; " is
+# NOT a separator — except in the fields below, which use "; " between entries
+# (LIVE_CHECK is this script's own field: its reasons are joined with "; ").
+# Free-text fields (SUMMARY, INVESTMENT) are no longer cut at "; ".
+SEMI_SPACE_FIELDS = {"ARBITRATORS", "CLAIMED", "AWARDED", "LIVE_CHECK"}
+MULTI_SEP_RE = re.compile(r";?[ \t]*\r?\n")
+
+
+def split_field(key, v):
+    """Split one cell of field `key` into its values (used by --list-values)."""
+    parts = MULTI_SEP_RE.split(str(v or ""))
+    if key in SEMI_SPACE_FIELDS:
+        parts = [q for p in parts for q in re.split(r";[ \t]+", p)]
+    out = []
+    for x in parts:
+        x = x.strip().rstrip(";").strip()
+        if x:
+            out.append(x)
+    return out
+
+
+def live_check_summary(matches):
+    """v1.2.1 (fix 9, 2026-10-27): one-line count of LIVE_CHECK flags by reason,
+    so the answer can state 'N flagged / M verified'. 'recent activity' is only
+    assigned when no other reason applies, so the three buckets do not overlap
+    except status + follow-on, which is counted once under each."""
+    flagged = [r for r in matches if r.get("LIVE_CHECK")]
+    st = sum(1 for r in flagged if "status pending" in r["LIVE_CHECK"])
+    fo = sum(1 for r in flagged if "follow-on proceeding pending" in r["LIVE_CHECK"])
+    ra = sum(1 for r in flagged if r["LIVE_CHECK"].startswith("recent activity"))
+    no_icsid = sum(1 for r in flagged if not r.get("ICSID_NO"))
+    return (f"LIVE_CHECK SUMMARY: {len(flagged)} of {len(matches)} matching rows flagged — "
+            f"status pending/unknown {st}; follow-on pending {fo}; recent activity only {ra} "
+            f"(last decision on/after {RECENT_DECISION_CUTOFF.isoformat()}); a row with both a "
+            f"status and a follow-on reason counts under each, so these may sum to more than "
+            f"{len(flagged)}. Flagged rows with no "
+            f"ICSID case number: {no_icsid} (route: PCA/other institution page, else tagged "
+            f"secondary). Verify status/follow-on rows live; verify recent-activity rows or "
+            f"disclose them as unverified; state 'N flagged / M verified' in the answer.")
 
 
 def enrich(rec):
@@ -303,7 +393,7 @@ def freshness(no_network):
     try:
         import urllib.request
         req = urllib.request.Request(FRESHNESS_URL, headers={
-            "User-Agent": "isds-research-skill/1.0.0 (non-commercial research; freshness check, max 1/day)"})
+            "User-Agent": "isds-research-skill/1.2.1 (non-commercial research; freshness check, max 1/day)"})
         html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", "replace")
         m_date = re.search(r"Updated as of\s*([0-3]?\d/[01]?\d/\d{4})", html)
         m_total = re.search(r"status=1000[^>]*>\s*([\d,]+)", html)
@@ -335,7 +425,7 @@ def footer(snap, n_total, args):
         f"GAP: cases initiated after {snap}, and post-snapshot developments (status changes, new decisions,",
         "  follow-on proceedings), are NOT in these results. Verify rows flagged LIVE_CHECK before relying",
         "  on status-sensitive fields.",
-        "CITE: UNCTAD, Investment Dispute Settlement Navigator: full data release as of 31/12/2023 (excel",
+        f"CITE: UNCTAD, Investment Dispute Settlement Navigator: full ISDS data release as of {REQUIRED_RELEASE_SHORT} (excel",
         "  format), https://investmentpolicy.unctad.org/investment-dispute-settlement",
     ]
     return "\n".join(lines)
@@ -376,7 +466,7 @@ def main():
         from collections import Counter
         c = Counter()
         for r in rows:
-            for part in re.split(r";\s*|\n", r.get(key, "")):
+            for part in split_field(key, r.get(key, "")):
                 if part.strip():
                     c[part.strip()] += 1
         for val, n in c.most_common():
@@ -417,6 +507,7 @@ def main():
     if args.json:
         print("JSON_RESULTS=" + json.dumps(matches, ensure_ascii=False))
 
+    print(live_check_summary(matches))
     print()
     print(footer(snap, len(rows), args))
 
